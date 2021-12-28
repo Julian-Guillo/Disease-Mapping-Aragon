@@ -8,13 +8,13 @@ output:
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_chunk$set(echo = FALSE)
 ```
 
 ## 1. Lectura y preparación de los datos
 
-
 ```{r warning=FALSE}
+## Librerías
 # operaciones con tablas
 library(dplyr)
 # lectura y tratamiento de datos geoespaciales
@@ -28,10 +28,13 @@ library(leaflet)
 ```
 
 ```{r}
-load(file.path("MaterialPractica", "Aragon.Rdata"))
+
+# Cargamos los datos con info por municipio
+load(file.path("datos", "Aragon.Rdata"))
 datos <- Aragon.df
 
-mapa <- read_sf(file.path("MaterialPractica", "aragon.shp")) %>%
+# Leemos los datos georeferenciamos y los unimos con los datos cargados previamente
+mapa <- read_sf(file.path("datos", "aragon.shp")) %>%
   left_join(datos, by = "CODMUNI") %>%
   mutate(RME = O / E)
 ```
@@ -46,12 +49,19 @@ ggplot(mapa) +
 Vamos a preparar la estructura de vecindad:
 
 ```{r}
+
+# Generamos estructura de vecindad
 vecinos <- poly2nb(mapa) %>%
   nb2WB()
 ```
 
 
 
+```{r}
+
+# Modelo de regresión de 
+```
+
 
 
 
@@ -70,12 +80,15 @@ vecinos <- poly2nb(mapa) %>%
 
 
 ```{r}
+
+## Mapa interactivo con librería leaflet
 mapa <- st_set_crs(mapa, 25830) # añade el sistema de coordenadas de referencia correcto
 mapa <- st_transform(mapa, 4326) # cambiarlo por el que usa leaflet
 ```
 
 
 ```{r}
+
 paleta <- colorNumeric("RdYlGn", domain = mapa$RME, reverse = TRUE)
 
 labels <- sprintf("<strong> %s </strong> <br/>
