@@ -5,10 +5,13 @@ date: "27/10/2021"
 output:
   html_document:
     df_print: paged
+    keep_md: true
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = FALSE)
+knitr::opts_chunk$set(echo = FALSE,
+                      message = FALSE,
+                      warning = FALSE)
 ```
 
 ## 1. Lectura y preparación de los datos
@@ -28,7 +31,6 @@ library(leaflet)
 ```
 
 ```{r}
-
 # Cargamos los datos con info por municipio
 load(file.path("datos", "Aragon.Rdata"))
 datos <- Aragon.df
@@ -49,7 +51,6 @@ ggplot(mapa) +
 Vamos a preparar la estructura de vecindad:
 
 ```{r}
-
 # Generamos estructura de vecindad
 vecinos <- poly2nb(mapa) %>%
   nb2WB()
@@ -58,7 +59,6 @@ vecinos <- poly2nb(mapa) %>%
 
 
 ```{r}
-
 # Modelo de regresión de 
 ```
 
