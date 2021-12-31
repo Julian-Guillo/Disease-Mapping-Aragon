@@ -29,6 +29,7 @@ library(dplyr) # operaciones con tablas
 library(sf) # lectura y tratamiento de datos geoespaciales
 library(spdep) # lectura y tratamiento de datos geoespaciales
 library(R2WinBUGS) # modelos bayesianos, llama a WinBUGS
+library(INLA) # modelos bayesianos utilizando INLA
 library(ggplot2) # representación gráfica
 theme_set(theme_void()) # cambiar estética de todos los plots de ggplot
 library(gridExtra) # extensión de ggplot para plotear varias gráficas a la vez
@@ -48,10 +49,10 @@ mapa <- read_sf(file.path("datos", "aragon.shp")) %>%
   mutate(RME = O / E)
 ```
 
-Para cada municipio tenemos el número de muertes observadas por enfermedad isquémica en hombres, así como el número esperado de muertes, calculado como el número de muertes que le correspondería a cada municipio dada su población, multiplicando la población del municipio por el número promedio de defunciones por habitante de Aragón. Como una primera aproximación, vamos a representar los observados y los esperados en un mapa:
+Para cada municipio tenemos el número de muertes observadas por enfermedad isquémica en hombres, así como el número esperado de muertes, calculado como el número de muertes que le correspondería a cada municipio dada su población, multiplicando la población del municipio por el número promedio de defunciones por habitante de Aragón. Como una primera aproximación, vamos a representar los observados, los esperados y el riesgo de mortalidad estandarizado en un mapa:
 
 ```{r echo=FALSE, fig.height=3}
-# Sacamos los cuantiles de cada variable para agrupar municipios por colores
+# aisgnamos un intervalo a cada observación, para cada variable de interés
 qO <- cut(round(mapa$O),
           round(quantile(mapa$O,
                          c(0, 0.8, 0.9, 0.95, 0.99, 1))),
@@ -70,7 +71,7 @@ mapa <- mapa %>%
          qE = qE,
          qRME = qRME)
 
-# Mapas estáticos con ggplot2
+# Mapas estáticos con ggplot2 (O, E, y RME)
 grid.arrange(
   ggplot(mapa) +
   geom_sf(aes(fill = qO)) +
@@ -110,21 +111,18 @@ grid.arrange(
 
 # 2. Ajuste de modelo car.normal
 
-Vamos a preparar la estructura de vecindad:
+
+## 2.1. Modelo en WinBUGS
 
 ```{r}
 # Generamos estructura de vecindad
 vecinos <- poly2nb(mapa) %>%
   nb2WB()
-```
 
-## 2.1. Modelo en WinBUGS
-
-```{r}
 # Modelo car.normal en WinBUGS
 set.seed(1234)
 
-modelo <- function(){
+modeloBugs <- function(){
   # verosimilitud
   for(i in 1:n){
     O[i] ~ dpois(mu[i])
@@ -174,7 +172,7 @@ resultados <- bugs(
   data = datos,
   inits = iniciales,
   parameters = param,
-  model = modelo,
+  model = modeloBugs,
   n.burnin = 3000,
   n.thin = 25,
   n.iter = 10000
@@ -182,16 +180,13 @@ resultados <- bugs(
 )
 ```
 
-```{r include=FALSE}
-mean(resultados$summary[,8])
-summary(resultados$summary[,9])
-resultados$summary[resultados$summary[,8] > 1.1,]
-```
 
 
 
 
-```{r}
+
+```{r echo=FALSE}
+# aisgnamos un intervalo a cada observación
 qRMSBugs <- cut(round(resultados$mean$R, 2), 
                 round(quantile(resultados$mean$R,
                                c(0, 0.25, 0.5, 0.7, 0.9, 0.95, 1)), 2),
@@ -203,10 +198,11 @@ qProbBugs <- cut(round(resultados$mean$pR, 2),
 
 mapa <- mapa %>%
   mutate(RMSBugs = resultados$mean$R,
-         ProbBugs = resultados$mean$pR,
+         probBugs = resultados$mean$pR,
          qRMSBugs = qRMSBugs,
-         )
+         qProbBugs = qProbBugs)
 
+# mapas estáticos con ggplot2 (Modelo WinBUGS)
 grid.arrange(
   ggplot(mapa) +
   geom_sf(aes(fill = qRMSBugs)) +
@@ -236,6 +232,101 @@ grid.arrange(
 
 ## 2.2. Modelo en INLA
 
+```{r}
+# Generamos estructura de vecindad y la guardamos en un archivo
+# poly2nb(mapa) %>%
+#   nb2INLA(file = file.path("datos", "aragon.graph"))
+
+# Modelo car.normal en INLA
+H <- inla.read.graph(filename = file.path("datos", "aragon.graph"))
+
+S <- U <- seq(1, 729)
+
+mapa <- mapa %>%
+  mutate(S = S,
+         U = U)
+
+formula <- 
+  O ~ 1 + 
+  f(S, 
+    model = "besag",
+    graph = H,
+    scale.model = TRUE,
+    hyper = list(
+      prec = list(prior = "loggamma", param = c(1, 0.001)))
+  ) +
+  f(U,
+    model = "iid",
+    hyper = list(prec = list(prior = "loggamma", param = c(1, 0.001)))
+  )
+
+modeloINLA <- inla(
+  formula = formula,
+  family = "poisson",
+  data = mapa,
+  E = E,
+  control.compute = list(dic = TRUE, waic = TRUE, cpo = TRUE),
+  control.predictor = list(compute = TRUE, cdf = c(log(1)))
+)
+```
+
+
+```{r}
+# aisgnamos un intervalo a cada observación
+qRMSINLA <- cut(round(modeloINLA$summary.fitted.values$mean, 2), 
+                round(quantile(modeloINLA$summary.fitted.values$mean,
+                               c(0, 0.2, 0.4, 0.6, 0.8, 0.9, 1)), 2),
+                include.lowest = TRUE)
+qProbINLA <- cut(round((1 - modeloINLA$summary.fitted.values$`1 cdf`), 2),
+                 round(quantile((1 - modeloINLA$summary.fitted.values$`1 cdf`),
+                                c(0, 0.25, 0.5, 0.7, 0.8, 0.95, 1)), 2),
+                 include.lowest = TRUE)
+
+
+mapa <- mapa %>%
+  mutate(RMSINLA = modeloINLA$summary.fitted.values$mean,
+         probINLA = 1 - modeloINLA$summary.fitted.values$`1 cdf`,
+         qRMSINLA = qRMSINLA,
+         qProbINLA = qProbINLA)
+
+# mapas estáticos con ggplot2 (Modelo INLA)
+grid.arrange(
+  ggplot(mapa) +
+  geom_sf(aes(fill = qRMSINLA)) +
+  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+  labs(fill="RMS") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        legend.title = element_text(size=12),
+        text = element_text(size=10),
+        legend.key.width = unit(0.4, 'cm')),
+  
+  ggplot(mapa) +
+  geom_sf(aes(fill = qProbINLA)) +
+  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+  labs(fill="P(RMS > 1)") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        legend.title = element_text(size=12),
+        legend.text = element_text(size=10),
+        legend.key.width = unit(0.4, 'cm')),
+
+  ncol = 2
+)
+```
+
+## 2.3. Predicciones de ambos modelos y residuos
+
+```{r}
+# Mapas de observados vs predicciones en WinBUGS e INLA
+```
+
+```{r}
+# Mapa de residuos para modelo WinBUGS e INLA
+```
+
 
 
 # 3. Mapa interactivo con librería leaflet
@@ -253,24 +344,31 @@ paleta <- colorQuantile(palette = "RdYlGn",
                         probs = c(0, 0.25, 0.5, 0.7, 0.9, 0.95, 1))
 # preparación de la leyenda de colores del mapa
 colores <- unique(paleta(sort(mapa$RMSBugs))) # sacamos los codigos hex
-etiquetas <- cut(round(mapa$RMSBugs, 2), 
+etiquetasLeyenda <- cut(round(mapa$RMSBugs, 2), 
                 round(quantile(mapa$RMSBugs,
                                c(0, 0.25, 0.5, 0.7, 0.9, 0.95, 1)), 2),
                 include.lowest = TRUE) %>%
   levels() %>%
   gsub(",", " - ", .)
 
-# preparación de las etiquetas a mostrar al pasar el cursos por el mapa
-labels <- sprintf("<strong> %s </strong> <br/>
+# preparación de las etiquetas a mostrar al pasar el cursor por el mapa
+etiquetas <- sprintf("<strong> %s </strong> <br/>
   Observados: %s <br/>
   Esperados: %s <br/>
   RME: %s <br/>
-  RMS Winbugs: %s",
+  RMS Winbugs: %s <br/>
+  P(RMS>1) Winbugs: %s <br/>
+  RMS INLA: %s <br/>
+  P(RMS>1) INLA: %s <br/>",
+  
   mapa$NOMBRE,
   mapa$O,
   round(mapa$E, 2),
   round(mapa$RME, 2),
-  round(mapa$RMSBugs, 2)
+  round(mapa$RMSBugs, 2),
+  round(mapa$probBugs, 2),
+  round(mapa$RMSINLA, 2),
+  round(mapa$probINLA, 2)
 ) %>%
   lapply(htmltools::HTML)
 
@@ -286,7 +384,7 @@ aragon <- leaflet(mapa) %>%
       color = "red",
       fillOpacity = 1,
       bringToFront = TRUE),
-    label = labels,
+    label = etiquetas,
     labelOptions = labelOptions(
       style = list(
         "font-weight" = "normal",
@@ -295,9 +393,9 @@ aragon <- leaflet(mapa) %>%
       textsize = "15px", direction = "auto"
     )
   ) %>%
-  addLegend(title = "RMS",
+  addLegend(title = "RMS (WinBUGS)",
             colors = colores, 
-            labels = etiquetas,
+            labels = etiquetasLeyenda,
             opacity = 1)
 
 aragon
