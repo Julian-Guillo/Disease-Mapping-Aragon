@@ -1,0 +1,315 @@
+---
+title: "Disease Mapping Aragón"
+author: "Julián Guilló"
+date: "27/10/2021"
+output:
+  rmdformats::downcute
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE)
+```
+
+```{r options_setup, echo = FALSE}
+options(scipen = 999) # para quitar la notacion cientifica
+```
+
+# Introducción
+
+En esta práctica vamos a tratar con datos de defunciones por enfermedad isquémica en Aragón, separados por municipio. Nuestro objetivo va a ser modelizar el riesgo de muerte a causa de esta enfermedad, y realizar una predicción del riesgo "real" de muerte para cada municipio. 
+
+# 1. Lectura y preparación de los datos
+
+```{r}
+# Librerías
+# install.packages("rmdformats") # plantillas para reporte HTML
+library(dplyr) # operaciones con tablas
+library(sf) # lectura y tratamiento de datos geoespaciales
+library(spdep) # lectura y tratamiento de datos geoespaciales
+library(R2WinBUGS) # modelos bayesianos, llama a WinBUGS
+library(ggplot2) # representación gráfica
+theme_set(theme_void()) # cambiar estética de todos los plots de ggplot
+library(gridExtra) # extensión de ggplot para plotear varias gráficas a la vez
+library(leaflet) # representación de mapas interactivos
+```
+
+Comenzamos cargando las librerías necesarias para nuestra práctica y leyendo los archivos de datos:
+
+```{r}
+# Cargamos los datos con info por municipio
+load(file.path("datos", "Aragon.Rdata"))
+datos <- Aragon.df
+
+# Leemos los datos georeferenciamos y los unimos con los datos cargados previamente
+mapa <- read_sf(file.path("datos", "aragon.shp")) %>%
+  left_join(datos, by = "CODMUNI") %>%
+  mutate(RME = O / E)
+```
+
+Para cada municipio tenemos el número de muertes observadas por enfermedad isquémica en hombres, así como el número esperado de muertes, calculado como el número de muertes que le correspondería a cada municipio dada su población, multiplicando la población del municipio por el número promedio de defunciones por habitante de Aragón. Como una primera aproximación, vamos a representar los observados y los esperados en un mapa:
+
+```{r echo=FALSE, fig.height=3}
+# Sacamos los cuantiles de cada variable para agrupar municipios por colores
+qO <- cut(round(mapa$O),
+          round(quantile(mapa$O,
+                         c(0, 0.8, 0.9, 0.95, 0.99, 1))),
+          include.lowest = TRUE)
+qE <- cut(round(mapa$E),
+          round(quantile(mapa$E,
+                         c(0, 0.8, 0.9, 0.95, 0.99, 1))),
+          include.lowest = TRUE)
+qRME <- cut(round(mapa$RME, 2),
+            round(quantile(mapa$RME,
+                           c(0, 0.5, 0.6, 0.75, 0.9, 1)), 2),
+            include.lowest = TRUE)
+
+mapa <- mapa %>%
+  mutate(qO = qO,
+         qE = qE,
+         qRME = qRME)
+
+# Mapas estáticos con ggplot2
+grid.arrange(
+  ggplot(mapa) +
+  geom_sf(aes(fill = qO)) +
+  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+  labs(fill="O") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        legend.title = element_text(size=12),
+        text = element_text(size=8),
+        legend.key.width = unit(0.4, 'cm')),
+  
+  ggplot(mapa) +
+  geom_sf(aes(fill = qE)) +
+  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+  labs(fill="E") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        legend.title = element_text(size=12),
+        legend.text = element_text(size=8),
+        legend.key.width = unit(0.4, 'cm')),
+  
+  ggplot(mapa) +
+  geom_sf(aes(fill = qRME)) +
+  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+    labs(fill="RME") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        legend.text = element_text(size=8)),
+  
+  ncol = 3
+)
+```
+
+
+# 2. Ajuste de modelo car.normal
+
+Vamos a preparar la estructura de vecindad:
+
+```{r}
+# Generamos estructura de vecindad
+vecinos <- poly2nb(mapa) %>%
+  nb2WB()
+```
+
+## 2.1. Modelo en WinBUGS
+
+```{r}
+# Modelo car.normal en WinBUGS
+set.seed(1234)
+
+modelo <- function(){
+  # verosimilitud
+  for(i in 1:n){
+    O[i] ~ dpois(mu[i])
+    log(mu[i]) <- log(E[i]) + m + het[i] + sp[i]
+    het[i] ~ dnorm(0, prechet)
+    R[i] <- exp(m + het[i] + sp[i]) # RMS
+  }
+  for (i in 1:n) {
+    pR[i] <- step(R[i]-1) # probabilidad de que riesgo superior a 1
+  }
+  
+  # distribuciones a priori
+  sp[1:n] ~ car.normal(adj[], w[], num[], precsp)
+  m ~ dflat()
+  prechet <- pow(sdhet, -2)
+  precsp <- pow(sdsp, -2)
+  sdhet ~ dunif(0, 10)
+  sdsp ~ dunif(0, 10)
+  
+  # distribución predictiva
+  for (i in 1:n){
+    yPred[i] ~ dpois(mu[i])
+    res[i] <- yPred[i] - O[i]
+    pRes[i] <- step(res[i])
+    pY[i] <- step(yPred[i])
+  }
+}
+
+datos<-list(O = mapa$O,
+            E = mapa$E,
+            n = nrow(mapa),
+            adj = vecinos$adj,
+            w = vecinos$weights,
+            num = vecinos$num)
+
+iniciales<-function(){
+  list(m = rnorm(1),
+       het= rnorm(nrow(mapa),0,0.1) ,
+       sp = rnorm(nrow(mapa),0,0.1),
+       sdhet=runif(1,0,1),
+       sdsp=runif(1,0,1),
+       yPred = rpois(nrow(mapa),mean(mapa$O)))
+}
+param <- c("R","m", "het","sp","sdhet","sdsp","pR","pRes","yPred","pY")
+
+resultados <- bugs(
+  data = datos,
+  inits = iniciales,
+  parameters = param,
+  model = modelo,
+  n.burnin = 3000,
+  n.thin = 25,
+  n.iter = 10000
+  # debug=TRUE
+)
+```
+
+```{r include=FALSE}
+mean(resultados$summary[,8])
+summary(resultados$summary[,9])
+resultados$summary[resultados$summary[,8] > 1.1,]
+```
+
+
+
+
+```{r}
+qRMSBugs <- cut(round(resultados$mean$R, 2), 
+                round(quantile(resultados$mean$R,
+                               c(0, 0.25, 0.5, 0.7, 0.9, 0.95, 1)), 2),
+                include.lowest = TRUE)
+qProbBugs <- cut(round(resultados$mean$pR, 2),
+                 round(quantile(resultados$mean$pR,
+                                c(0, 0.25, 0.5, 0.7, 0.9, 0.95, 1)), 2),
+                 include.lowest = TRUE)
+
+mapa <- mapa %>%
+  mutate(RMSBugs = resultados$mean$R,
+         ProbBugs = resultados$mean$pR,
+         qRMSBugs = qRMSBugs,
+         )
+
+grid.arrange(
+  ggplot(mapa) +
+  geom_sf(aes(fill = qRMSBugs)) +
+  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+  labs(fill="RMS") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        legend.title = element_text(size=12),
+        text = element_text(size=10),
+        legend.key.width = unit(0.4, 'cm')),
+  
+  ggplot(mapa) +
+  geom_sf(aes(fill = qProbBugs)) +
+  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+  labs(fill="P(RMS > 1)") +
+  theme(axis.text.x=element_blank(),
+        axis.text.y=element_blank(),
+        axis.ticks=element_blank(),
+        legend.title = element_text(size=12),
+        legend.text = element_text(size=10),
+        legend.key.width = unit(0.4, 'cm')),
+
+  ncol = 2
+)
+```
+
+## 2.2. Modelo en INLA
+
+
+
+# 3. Mapa interactivo con librería leaflet
+
+
+
+```{r echo=FALSE}
+# Mapa interactivo con librería leaflet
+mapa <- st_set_crs(mapa, 25830) # añade el sistema de coordenadas de referencia correcto
+mapa <- st_transform(mapa, 4326) # cambiarlo por el que usa leaflet
+
+# coloreado por cuantiles
+paleta <- colorQuantile(palette = "RdYlGn", 
+                        domain = mapa$RMSBugs, reverse = TRUE,
+                        probs = c(0, 0.25, 0.5, 0.7, 0.9, 0.95, 1))
+# preparación de la leyenda de colores del mapa
+colores <- unique(paleta(sort(mapa$RMSBugs))) # sacamos los codigos hex
+etiquetas <- cut(round(mapa$RMSBugs, 2), 
+                round(quantile(mapa$RMSBugs,
+                               c(0, 0.25, 0.5, 0.7, 0.9, 0.95, 1)), 2),
+                include.lowest = TRUE) %>%
+  levels() %>%
+  gsub(",", " - ", .)
+
+# preparación de las etiquetas a mostrar al pasar el cursos por el mapa
+labels <- sprintf("<strong> %s </strong> <br/>
+  Observados: %s <br/>
+  Esperados: %s <br/>
+  RME: %s <br/>
+  RMS Winbugs: %s",
+  mapa$NOMBRE,
+  mapa$O,
+  round(mapa$E, 2),
+  round(mapa$RME, 2),
+  round(mapa$RMSBugs, 2)
+) %>%
+  lapply(htmltools::HTML)
+
+# Creación del mapa
+aragon <- leaflet(mapa) %>%
+  addTiles() %>%
+  addPolygons(
+    color = "black", fillColor = ~ paleta(RMSBugs),
+    fillOpacity = 0.7,
+    weight = 1,
+    highlightOptions = highlightOptions(
+      weight = 3,
+      color = "red",
+      fillOpacity = 1,
+      bringToFront = TRUE),
+    label = labels,
+    labelOptions = labelOptions(
+      style = list(
+        "font-weight" = "normal",
+        padding = "3px 8px"
+      ),
+      textsize = "15px", direction = "auto"
+    )
+  ) %>%
+  addLegend(title = "RMS",
+            colors = colores, 
+            labels = etiquetas,
+            opacity = 1)
+
+aragon
+```
+
+
+# Reproducibilidad
+
+Puedes descargar todo el código y los datos en este [link](https://github.com/Julian-Guillo/Disease-Mapping-Aragon "Github de Julián").
+
+
+
+
+
+
