@@ -43,7 +43,7 @@ Comenzamos cargando las librerías necesarias para nuestra práctica y leyendo l
 load(file.path("datos", "Aragon.Rdata"))
 datos <- Aragon.df
 
-# Leemos los datos georeferenciamos y los unimos con los datos cargados previamente
+# Leemos los datos georeferenciamos y los unimos con los datos cargados
 mapa <- read_sf(file.path("datos", "aragon.shp")) %>%
   left_join(datos, by = "CODMUNI") %>%
   mutate(RME = O / E)
@@ -52,7 +52,7 @@ mapa <- read_sf(file.path("datos", "aragon.shp")) %>%
 Para cada municipio tenemos el número de muertes observadas por enfermedad isquémica en hombres, así como el número esperado de muertes, calculado como el número de muertes que le correspondería a cada municipio dada su población, multiplicando la población del municipio por el número promedio de defunciones por habitante de Aragón. Como una primera aproximación, vamos a representar los observados, los esperados y el riesgo de mortalidad estandarizado en un mapa:
 
 ```{r echo=FALSE, fig.height=3}
-# aisgnamos un intervalo a cada observación, para cada variable de interés
+# asignamos un intervalo a cada observación, para cada variable de interés
 qO <- cut(round(mapa$O),
           round(quantile(mapa$O,
                          c(0, 0.8, 0.9, 0.95, 0.99, 1))),
@@ -74,52 +74,59 @@ mapa <- mapa %>%
 # Mapas estáticos con ggplot2 (O, E, y RME)
 grid.arrange(
   ggplot(mapa) +
-  geom_sf(aes(fill = qO)) +
-  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
-  labs(fill="O") +
-  theme(axis.text.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks=element_blank(),
-        legend.title = element_text(size=12),
-        text = element_text(size=8),
-        legend.key.width = unit(0.4, 'cm')),
+    geom_sf(aes(fill = qO)) +
+    # coloreado por cuantiles
+    scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+    labs(fill="O") +
+    theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks=element_blank(),
+          legend.title = element_text(size=12),
+          text = element_text(size=8),
+          legend.key.width = unit(0.4, 'cm')),
   
   ggplot(mapa) +
-  geom_sf(aes(fill = qE)) +
-  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
-  labs(fill="E") +
-  theme(axis.text.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks=element_blank(),
-        legend.title = element_text(size=12),
-        legend.text = element_text(size=8),
-        legend.key.width = unit(0.4, 'cm')),
+    geom_sf(aes(fill = qE)) +
+    # coloreado por cuantiles
+    scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+    labs(fill="E") +
+    theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks=element_blank(),
+          legend.title = element_text(size=12),
+          legend.text = element_text(size=8),
+          legend.key.width = unit(0.4, 'cm')),
   
   ggplot(mapa) +
-  geom_sf(aes(fill = qRME)) +
-  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+    geom_sf(aes(fill = qRME)) +
+    # coloreado por cuantiles
+    scale_fill_brewer(palette = "RdYlGn", direction = -1) +
     labs(fill="RME") +
-  theme(axis.text.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks=element_blank(),
-        legend.text = element_text(size=8)),
+    theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks=element_blank(),
+          legend.text = element_text(size=8)),
   
   ncol = 3
 )
 ```
 
+Se puede apreciar en los mapas del número de casos observados y esperados que el número de fallecimientos es muy dependiente de la población de cada municipio, y que si no lo ajustamos de alguna forma lo único que vamos a observar en el mapa es un reflejo de la población de cada municipio. Al dividir observados entre esperados obtenemos la Razón de Mortalidad Estandarizada (RME), que ya es un indicador más preciso del riesgo real de fallecimiento. Un RME mayor a 1 indica un exceso de riesgo, por lo que el mapa en el que representamos el RME es útil para conocer las zonas de mayor riesgo. El problema es que muchos municipios de Aragón poseen muy pocos habitantes, por lo que una desviación muy pequeña entre observados y esperados causa variaciones muy grandes en el RME, teniendo zonas con un riesgo aparente de 0, y zonas con un exceso de riesgo enorme, cuando realmente sólo hay uno o dos fallecimientos de diferencia entre observados y esperados. Es por esto que vamos a ajustar un modelo que nos suavice este riesgo, teniendo el cuenta los casos observados en los municipios vecinos, para tratar de encontrar una estimación del riesgo que se asemeje más a la realidad.
 
-# 2. Ajuste de modelo car.normal
+# 2. Ajuste de modelo de Besag, York y Mollié
 
+Vamos a implementar el modelo de Besag, York y Mollié (BYS), tanto en WinBUGS como en INLA. Este es un modelo jerárquico que combina un modelo poisson gamma con un efecto autorregresivo que confiere un efecto espacial, al tener en cuenta las observaciones en las localidades colindantes.
 
 ## 2.1. Modelo en WinBUGS
+
+Ajustamos primero el modelo en WinBUGS, que se basa en el uso de simulaciones mediante métodos MCMC (Marcov chain Monte Carlo). Para ello, nos aseguramos de que el número de iteraciones, el burn-in (número de muestras simuladas iniciales que eliminamos) y el *thin* (se guarda una muestra cada k iteraciones) son los suficientes para que las cadenas converjan correctamente. El código utilizado para ajustar el modelo es el siguiente:
 
 ```{r}
 # Generamos estructura de vecindad
 vecinos <- poly2nb(mapa) %>%
   nb2WB()
 
-# Modelo car.normal en WinBUGS
+# Modelo BYS en WinBUGS
 set.seed(1234)
 
 modeloBugs <- function(){
@@ -180,13 +187,10 @@ resultados <- bugs(
 )
 ```
 
-
-
-
-
+Representamos en un mapa el Riesgo de Mortalidad Suavizado (RMS) para cada municipio, así como la probabilidad estimada de que el riesgo sea superior a 1, que no es sino la proporción de iteraciones en las que el valor estimado por el modelo supera la unidad.
 
 ```{r echo=FALSE}
-# aisgnamos un intervalo a cada observación
+# asignamos un intervalo a cada observación
 qRMSBugs <- cut(round(resultados$mean$R, 2), 
                 round(quantile(resultados$mean$R,
                                c(0, 0.25, 0.5, 0.7, 0.9, 0.95, 1)), 2),
@@ -205,30 +209,76 @@ mapa <- mapa %>%
 # mapas estáticos con ggplot2 (Modelo WinBUGS)
 grid.arrange(
   ggplot(mapa) +
-  geom_sf(aes(fill = qRMSBugs)) +
-  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
-  labs(fill="RMS") +
-  theme(axis.text.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks=element_blank(),
-        legend.title = element_text(size=12),
-        text = element_text(size=10),
-        legend.key.width = unit(0.4, 'cm')),
+    geom_sf(aes(fill = qRMSBugs)) +
+    # coloreado por cuantiles
+    scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+    labs(fill="RMS") +
+    theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks=element_blank(),
+          legend.title = element_text(size=12),
+          text = element_text(size=10),
+          legend.key.width = unit(0.4, 'cm')),
   
   ggplot(mapa) +
-  geom_sf(aes(fill = qProbBugs)) +
-  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
-  labs(fill="P(RMS > 1)") +
-  theme(axis.text.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks=element_blank(),
-        legend.title = element_text(size=12),
-        legend.text = element_text(size=10),
-        legend.key.width = unit(0.4, 'cm')),
-
+    geom_sf(aes(fill = qProbBugs)) +
+    # coloreado por cuantiles
+    scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+    labs(fill="P(RMS > 1)") +
+    theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks=element_blank(),
+          legend.title = element_text(size=12),
+          legend.text = element_text(size=10),
+          legend.key.width = unit(0.4, 'cm')),
+  
   ncol = 2
 )
 ```
+
+Observamos que el riesgo es inferior en el norte y el sur de la comunidad con respecto al centro, siendo este especialmente alto en el oeste, en la zona de las conocidas "cinco villas" como Tauste, Sádaba y Ejea de los Caballeros. Procedemos a ajustar este mismo modelo utilizando INLA para ver si obtenemos resultados similares. Comparamos las predicciones de observados frente a los valores observados reales:
+
+```{r echo=FALSE}
+# asignamos un intervalo a cada observación
+qPredBugs <- cut(round(resultados$mean$yPred), 
+                 round(quantile(resultados$mean$yPred,
+                                c(0, 0.8, 0.9, 0.95, 0.99, 1))),
+                 include.lowest = TRUE)
+
+mapa <- mapa %>%
+  mutate(predBugs = resultados$mean$yPred,
+         qPredBugs = qPredBugs)
+
+# Mapas de observados vs predicciones en WinBUGS
+grid.arrange(
+  ggplot(mapa) +
+    geom_sf(aes(fill = qO)) +
+    # coloreado por cuantiles
+    scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+    labs(fill="Observados") +
+    theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks=element_blank(),
+          legend.title = element_text(size=12),
+          text = element_text(size=10),
+          legend.key.width = unit(0.4, 'cm')),
+  
+  ggplot(mapa) +
+    geom_sf(aes(fill = qPredBugs)) +
+    # coloreado por cuantiles
+    scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+    labs(fill="Predichos\n(WinBUGS)") +
+    theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks=element_blank(),
+          legend.title = element_text(size=12),
+          legend.text = element_text(size=10),
+          legend.key.width = unit(0.4, 'cm')),
+  
+  ncol = 2
+)
+```
+
 
 ## 2.2. Modelo en INLA
 
@@ -237,7 +287,7 @@ grid.arrange(
 # poly2nb(mapa) %>%
 #   nb2INLA(file = file.path("datos", "aragon.graph"))
 
-# Modelo car.normal en INLA
+# Modelo BYS en INLA
 H <- inla.read.graph(filename = file.path("datos", "aragon.graph"))
 
 S <- U <- seq(1, 729)
@@ -270,9 +320,10 @@ modeloINLA <- inla(
 )
 ```
 
+Representamos de nuevo en un mapa tanto el RMS como la probabilidad estimada de que el riesgo sea superior a 1.
 
-```{r}
-# aisgnamos un intervalo a cada observación
+```{r echo=FALSE}
+# asignamos un intervalo a cada observación
 qRMSINLA <- cut(round(modeloINLA$summary.fitted.values$mean, 2), 
                 round(quantile(modeloINLA$summary.fitted.values$mean,
                                c(0, 0.2, 0.4, 0.6, 0.8, 0.9, 1)), 2),
@@ -292,51 +343,87 @@ mapa <- mapa %>%
 # mapas estáticos con ggplot2 (Modelo INLA)
 grid.arrange(
   ggplot(mapa) +
-  geom_sf(aes(fill = qRMSINLA)) +
-  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
-  labs(fill="RMS") +
-  theme(axis.text.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks=element_blank(),
-        legend.title = element_text(size=12),
-        text = element_text(size=10),
-        legend.key.width = unit(0.4, 'cm')),
+    geom_sf(aes(fill = qRMSINLA)) +
+    # coloreado por cuantiles
+    scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+    labs(fill="RMS") +
+    theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks=element_blank(),
+          legend.title = element_text(size=12),
+          text = element_text(size=10),
+          legend.key.width = unit(0.4, 'cm')),
   
   ggplot(mapa) +
-  geom_sf(aes(fill = qProbINLA)) +
-  scale_fill_brewer(palette = "RdYlGn", direction = -1) +
-  labs(fill="P(RMS > 1)") +
-  theme(axis.text.x=element_blank(),
-        axis.text.y=element_blank(),
-        axis.ticks=element_blank(),
-        legend.title = element_text(size=12),
-        legend.text = element_text(size=10),
-        legend.key.width = unit(0.4, 'cm')),
-
+    geom_sf(aes(fill = qProbINLA)) +
+    # coloreado por cuantiles
+    scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+    labs(fill="P(RMS > 1)") +
+    theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks=element_blank(),
+          legend.title = element_text(size=12),
+          legend.text = element_text(size=10),
+          legend.key.width = unit(0.4, 'cm')),
+  
   ncol = 2
 )
 ```
 
-## 2.3. Predicciones de ambos modelos y residuos
+Como se puede apreciar, obtenemos unos riesgos muy similares a los obtenidos con WinBUGS, y, si bien en este caso estos quedan algo más suavizados, en general el riesgo se distribuye de la misma forma en ambas implementaciones. Comparamos de nuevo las predicciones de observados frente a los valores observados reales:
 
-```{r}
-# Mapas de observados vs predicciones en WinBUGS e INLA
+```{r echo=FALSE}
+# asignamos un intervalo a cada observación
+qPredINLA <- cut(round(modeloINLA$summary.fitted.values$mean * mapa$E), 
+                 round(quantile(modeloINLA$summary.fitted.values$mean * mapa$E,
+                                c(0, 0.8, 0.9, 0.95, 0.99, 1))),
+                 include.lowest = TRUE)
+
+mapa <- mapa %>%
+  mutate(predINLA = modeloINLA$summary.fitted.values$mean * mapa$E,
+         qPredINLA = qPredINLA)
+
+# Mapas de observados vs predicciones en INLA
+grid.arrange(
+  ggplot(mapa) +
+    geom_sf(aes(fill = qO)) +
+    # coloreado por cuantiles
+    scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+    labs(fill="Observados") +
+    theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks=element_blank(),
+          legend.title = element_text(size=12),
+          text = element_text(size=10),
+          legend.key.width = unit(0.4, 'cm')),
+  
+  ggplot(mapa) +
+    geom_sf(aes(fill = qPredINLA)) +
+    # coloreado por cuantiles
+    scale_fill_brewer(palette = "RdYlGn", direction = -1) +
+    labs(fill="Predichos\n(INLA)") +
+    theme(axis.text.x=element_blank(),
+          axis.text.y=element_blank(),
+          axis.ticks=element_blank(),
+          legend.title = element_text(size=12),
+          legend.text = element_text(size=10),
+          legend.key.width = unit(0.4, 'cm')),
+  
+  ncol = 2
+)
 ```
-
-```{r}
-# Mapa de residuos para modelo WinBUGS e INLA
-```
-
 
 
 # 3. Mapa interactivo con librería leaflet
 
-
+Vamos a representar en un mapa interactivo todos los riesgos y probabilidades estimados, para tener toda la información obtenida a lo largo de la práctica en un único lugar y poder visualizarla y compararla más eficientemente.
 
 ```{r echo=FALSE}
-# Mapa interactivo con librería leaflet
-mapa <- st_set_crs(mapa, 25830) # añade el sistema de coordenadas de referencia correcto
-mapa <- st_transform(mapa, 4326) # cambiarlo por el que usa leaflet
+## Mapa interactivo con librería leaflet
+# añade el sistema de coordenadas de referencia correcto
+mapa <- st_set_crs(mapa, 25830) 
+# cambiarlo por el que usa leaflet
+mapa <- st_transform(mapa, 4326) 
 
 # coloreado por cuantiles
 paleta <- colorQuantile(palette = "RdYlGn", 
@@ -345,35 +432,38 @@ paleta <- colorQuantile(palette = "RdYlGn",
 # preparación de la leyenda de colores del mapa
 colores <- unique(paleta(sort(mapa$RMSBugs))) # sacamos los codigos hex
 etiquetasLeyenda <- cut(round(mapa$RMSBugs, 2), 
-                round(quantile(mapa$RMSBugs,
-                               c(0, 0.25, 0.5, 0.7, 0.9, 0.95, 1)), 2),
-                include.lowest = TRUE) %>%
+                        round(quantile(mapa$RMSBugs,
+                                       c(0, 0.25, 0.5, 0.7, 0.9, 0.95, 1)), 2),
+                        include.lowest = TRUE) %>%
   levels() %>%
   gsub(",", " - ", .)
 
 # preparación de las etiquetas a mostrar al pasar el cursor por el mapa
-etiquetas <- sprintf("<strong> %s </strong> <br/>
+etiquetas <- sprintf(
+  "<strong> %s </strong> <br/>
   Observados: %s <br/>
-  Esperados: %s <br/>
+  Predichos (WinBUGS): %s <br/>
+  Predichos (INLA): %s <br/>
   RME: %s <br/>
   RMS Winbugs: %s <br/>
-  P(RMS>1) Winbugs: %s <br/>
   RMS INLA: %s <br/>
+  P(RMS>1) Winbugs: %s <br/>
   P(RMS>1) INLA: %s <br/>",
   
   mapa$NOMBRE,
   mapa$O,
-  round(mapa$E, 2),
+  round(mapa$predBugs, 1),
+  round(mapa$predINLA, 1),
   round(mapa$RME, 2),
   round(mapa$RMSBugs, 2),
-  round(mapa$probBugs, 2),
   round(mapa$RMSINLA, 2),
+  round(mapa$probBugs, 2),
   round(mapa$probINLA, 2)
 ) %>%
   lapply(htmltools::HTML)
 
 # Creación del mapa
-aragon <- leaflet(mapa) %>%
+mapaAragon <- leaflet(mapa) %>%
   addTiles() %>%
   addPolygons(
     color = "black", fillColor = ~ paleta(RMSBugs),
@@ -398,13 +488,15 @@ aragon <- leaflet(mapa) %>%
             labels = etiquetasLeyenda,
             opacity = 1)
 
-aragon
+mapaAragon
 ```
 
 
 # Reproducibilidad
 
-Puedes descargar todo el código y los datos en este [link](https://github.com/Julian-Guillo/Disease-Mapping-Aragon "Github de Julián").
+La elaboración de este informe ha sido gestionada mediante el uso de git. Puedes descargar todo el código y los datos en este [link](https://github.com/Julian-Guillo/Disease-Mapping-Aragon "Github de Julián"), o, si eres usuario de git, utilizando el comando `git clone https://github.com/Julian-Guillo/Disease-Mapping-Aragon`.
+
+Con respecto al código, este ha sido extensamente comentado, los nombres de las variables son representativos de su contenido y siguen la convención camelCase. Para cualquier corrección o duda por favor abrir un pull request o contactar conmigo a julianleioa@gmail.com.
 
 
 
